@@ -15,6 +15,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using BepInEx;
@@ -29,6 +30,9 @@ using Awaken.TG.Main.Memories;
 using Awaken.TG.Main.Animations.FSM.Heroes.Base;
 using Awaken.TG.Main.Fights.NPCs;
 using Awaken.TG.Main.Fights.DamageInfo;
+using Awaken.TG.Main.Utility.Animations;
+using Awaken.TG.Main.Utility.Animations.ARAnimator;
+using Animancer;
 
 namespace TGCoopPlus
 {
@@ -38,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.3.0";
+        public const string Version = "1.4.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -51,6 +55,7 @@ namespace TGCoopPlus
         internal static ConfigEntry<bool> EnableStoryRetry;
         internal static ConfigEntry<bool> EnableHostAuthority;
         internal static ConfigEntry<bool> EnableSharedKillExp;
+        internal static ConfigEntry<bool> EnableLegsFix;
         internal static ConfigEntry<bool> AnimDebug;
 
         private Harmony _harmony;
@@ -74,6 +79,8 @@ namespace TGCoopPlus
                 "Progress flows ONLY host -> client: the client never sends quests/flags/story rewards and the host ignores them. / 進度只從主機流向客戶端：客戶端不送任務、旗標、劇情獎勵，主機也忽略它們。");
             EnableSharedKillExp = Config.Bind("Fixes", "SharedKillExp", true,
                 "When the partner (or a host-confirmed kill) kills an enemy in your world, you also get the kill XP. / 隊友在你的世界殺死敵人時，你也獲得擊殺經驗。");
+            EnableLegsFix = Config.Bind("Fixes", "LegsFix", true,
+                "Drive the clone's leg blend tree from the partner's velocity directly and play crouched legs when the partner crouches (first-person senders have no legs state machine). / 直接用隊友速度驅動分身腿部混合動畫，蹲下時播放蹲姿腿部動畫。");
             AnimDebug = Config.Bind("Debug", "AnimDebug", true,
                 "Log every remote animation state applied to the partner clone (first 300 per session). / 記錄套用到隊友分身的每個遠端動畫狀態（每場前 300 筆）。");
 
@@ -101,6 +108,11 @@ namespace TGCoopPlus
                 if (EnableSharedKillExp.Value) SharedKillExp.Apply(_harmony);
             }
             catch (Exception e) { Log.LogError("[SharedKillExp] failed: " + e); }
+            try
+            {
+                if (EnableLegsFix.Value) LegsFix.Apply(_harmony);
+            }
+            catch (Exception e) { Log.LogError("[LegsFix] failed: " + e); }
             try
             {
                 if (AnimDebug.Value) AnimDebugLog.Apply(_harmony);
@@ -543,6 +555,140 @@ namespace TGCoopPlus
             string state = __args[1] == null ? "?" : __args[1].ToString();
             Plugin.Log.LogInfo("[AnimDebug] remote " + layer + "/" + state);
             if (_count == Max) Plugin.Log.LogInfo("[AnimDebug] limit reached; further states not logged.");
+        }
+    }
+
+    // =====================================================================================
+    //  2f. LegsFix — legs of the partner clone
+    //      A first-person sender has no Legs state machine, so the clone's legs are driven only by
+    //      PlayerState.RelVel (TargetLocomotion) and PlayerState.Crouching. We (1) push the velocity
+    //      into whatever mixer is playing on layer 0 ourselves, (2) swap in the CrouchedIdle /
+    //      CrouchedMovement legs clips while the partner crouches, (3) log the numbers periodically.
+    // =====================================================================================
+    internal static class LegsFix
+    {
+        private static Type _tPuppet;
+        private static FieldInfo _fReady, _fCrouching, _fAnimations, _fIdle, _fMovement, _fMoving, _fTarget, _fMixerParam, _fAnimancer, _fLegsOverride, _fActiveMixers;
+        private static MethodInfo _mPlayOnLegs;
+
+        private class Slot
+        {
+            public object Idle, Move, CIdle, CMove;
+            public bool Resolved, LastCrouch, Reported;
+            public Vector2 Param;
+            public float NextDiag;
+        }
+        private static readonly Dictionary<object, Slot> _slots = new Dictionary<object, Slot>();
+        private static int _diagLines;
+        private const int MaxDiag = 90;
+
+        public static void Apply(Harmony h)
+        {
+            _tPuppet = AccessTools.TypeByName("TGCoop.Sync.PuppetAnimancer");
+            if (_tPuppet == null) { Plugin.Log.LogWarning("[LegsFix] PuppetAnimancer not found."); return; }
+            _fReady = AccessTools.Field(_tPuppet, "_ready");
+            _fCrouching = AccessTools.Field(_tPuppet, "_crouching");
+            _fAnimations = AccessTools.Field(_tPuppet, "_animations");
+            _fIdle = AccessTools.Field(_tPuppet, "_idle");
+            _fMovement = AccessTools.Field(_tPuppet, "_movement");
+            _fMoving = AccessTools.Field(_tPuppet, "_moving");
+            _fTarget = AccessTools.Field(_tPuppet, "TargetLocomotion");
+            _fMixerParam = AccessTools.Field(_tPuppet, "_mixerParam");
+            _fAnimancer = AccessTools.Field(_tPuppet, "_animancer");
+            _fLegsOverride = AccessTools.Field(_tPuppet, "_legsOverride");
+            _fActiveMixers = AccessTools.Field(_tPuppet, "_activeMixers");
+            _mPlayOnLegs = AccessTools.Method(_tPuppet, "PlayOnLegs");
+            if (_fReady == null || _fCrouching == null || _fIdle == null || _fMovement == null || _fTarget == null || _fAnimancer == null || _mPlayOnLegs == null)
+            { Plugin.Log.LogWarning("[LegsFix] some PuppetAnimancer members not found; disabled."); return; }
+            MethodInfo upd = AccessTools.Method(_tPuppet, "Update");
+            h.Patch(upd, new HarmonyMethod(typeof(LegsFix), "UpdatePrefix"), new HarmonyMethod(typeof(LegsFix), "UpdatePostfix"));
+            Plugin.Log.LogInfo("[LegsFix] enabled (velocity-driven legs mixer + crouched legs).");
+        }
+
+        private static Slot GetSlot(object inst)
+        {
+            Slot s;
+            if (!_slots.TryGetValue(inst, out s)) { s = new Slot(); _slots[inst] = s; }
+            return s;
+        }
+
+        private static void Resolve(object inst, Slot s)
+        {
+            s.Resolved = true;
+            s.Idle = _fIdle.GetValue(inst);
+            s.Move = _fMovement.GetValue(inst);
+            try
+            {
+                ARHeroAnimancerBaseAnimations anims = _fAnimations == null ? null : _fAnimations.GetValue(inst) as ARHeroAnimancerBaseAnimations;
+                if (anims != null && anims.animationMappings != null)
+                {
+                    foreach (ARHeroStateToAnimationMapping map in anims.animationMappings)
+                    {
+                        if (map == null || map.layerType != HeroLayerType.Legs) continue;
+                        if (s.CIdle == null) s.CIdle = AnimancerUtils.GetAnimancerNodes(HeroStateType.CrouchedIdle, map).FirstOrDefault();
+                        if (s.CMove == null) s.CMove = AnimancerUtils.GetAnimancerNodes(HeroStateType.CrouchedMovement, map).FirstOrDefault();
+                    }
+                }
+            }
+            catch (Exception e) { Plugin.Log.LogWarning("[LegsFix] crouched clips lookup failed: " + e.Message); }
+            Plugin.Log.LogInfo("[LegsFix] legs clips: idle=" + (s.Idle != null) + " move=" + (s.Move != null) + " crouchIdle=" + (s.CIdle != null) + " crouchMove=" + (s.CMove != null));
+        }
+
+        public static void UpdatePrefix(object __instance)
+        {
+            try
+            {
+                if (!(bool)_fReady.GetValue(__instance)) return;
+                Slot s = GetSlot(__instance);
+                if (!s.Resolved) Resolve(__instance, s);
+                if (s.CIdle == null && s.CMove == null) return;
+                bool crouch = (bool)_fCrouching.GetValue(__instance);
+                if (crouch == s.LastCrouch) return;
+                s.LastCrouch = crouch;
+                object idle = crouch && s.CIdle != null ? s.CIdle : s.Idle;
+                object move = crouch && s.CMove != null ? s.CMove : s.Move;
+                _fIdle.SetValue(__instance, idle);
+                _fMovement.SetValue(__instance, move);
+                bool legsOverride = _fLegsOverride != null && (bool)_fLegsOverride.GetValue(__instance);
+                if (!legsOverride)
+                {
+                    bool moving = _fMoving != null && (bool)_fMoving.GetValue(__instance);
+                    _mPlayOnLegs.Invoke(__instance, new object[] { moving ? move : idle });
+                }
+                if (_diagLines < MaxDiag) { _diagLines++; Plugin.Log.LogInfo("[LegsFix] crouch=" + crouch + " -> legs clips swapped"); }
+            }
+            catch (Exception e) { if (_diagLines < MaxDiag) { _diagLines++; Plugin.Log.LogWarning("[LegsFix] prefix: " + e.Message); } }
+        }
+
+        public static void UpdatePostfix(object __instance)
+        {
+            try
+            {
+                if (!(bool)_fReady.GetValue(__instance)) return;
+                Slot s = GetSlot(__instance);
+                AnimancerComponent ac = _fAnimancer.GetValue(__instance) as AnimancerComponent;
+                if (ac == null || ac.Layers.Count == 0) return;
+                AnimancerState cur = ac.Layers[0].CurrentState;
+                Vector2 target = (Vector2)_fTarget.GetValue(__instance);
+                Vector2 want = new Vector2(target.y, target.x);           // same axis order the game's TppMovementState uses
+                s.Param = Vector2.MoveTowards(s.Param, want, 25f * Time.deltaTime);
+                MixerState<Vector2> mixer = cur as MixerState<Vector2>;
+                bool legsOverride = _fLegsOverride != null && (bool)_fLegsOverride.GetValue(__instance);
+                if (mixer != null && !legsOverride) mixer.Parameter = s.Param;
+
+                if (Plugin.AnimDebug.Value && _diagLines < MaxDiag && Time.realtimeSinceStartup >= s.NextDiag)
+                {
+                    s.NextDiag = Time.realtimeSinceStartup + 2f;
+                    _diagLines++;
+                    int active = 0; try { var d = _fActiveMixers == null ? null : _fActiveMixers.GetValue(__instance) as System.Collections.ICollection; if (d != null) active = d.Count; } catch { }
+                    Vector2 modParam = _fMixerParam == null ? Vector2.zero : (Vector2)_fMixerParam.GetValue(__instance);
+                    Plugin.Log.LogInfo(string.Format("[LegsFix] target=({0:F2},{1:F2}) modParam=({2:F2},{3:F2}) ours=({4:F2},{5:F2}) moving={6} crouch={7} override={8} activeMixers={9} L0={10}",
+                        target.x, target.y, modParam.x, modParam.y, s.Param.x, s.Param.y,
+                        _fMoving != null && (bool)_fMoving.GetValue(__instance), (bool)_fCrouching.GetValue(__instance), legsOverride, active,
+                        cur == null ? "none" : (cur.GetType().Name + (mixer != null ? " p=(" + mixer.Parameter.x.ToString("F2") + "," + mixer.Parameter.y.ToString("F2") + ")" : ""))));
+                }
+            }
+            catch (Exception e) { if (_diagLines < MaxDiag) { _diagLines++; Plugin.Log.LogWarning("[LegsFix] postfix: " + e.Message); } }
         }
     }
 

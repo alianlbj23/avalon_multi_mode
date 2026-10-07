@@ -9,7 +9,8 @@ $refs = @(
     "$managed\mscorlib.dll", "$managed\System.dll", "$managed\System.Core.dll", "$managed\netstandard.dll",
     "$managed\UnityEngine.dll", "$managed\UnityEngine.CoreModule.dll", "$managed\UnityEngine.IMGUIModule.dll",
     "$managed\UnityEngine.InputLegacyModule.dll", "$managed\UnityEngine.TextRenderingModule.dll",
-    "$managed\TG.Main.dll", "$managed\Awaken.Utility.dll", "$managed\com.rlabrecque.steamworks.net.dll",
+    "$managed\TG.Main.dll", "$managed\Awaken.Utility.dll", "$managed\com.rlabrecque.steamworks.net.dll", "$managed\Animancer.dll",
+    "$managed\UnityEngine.AnimationModule.dll", "$managed\Awaken.PackageUtilities.dll",
     "$core\BepInEx.dll", "$core\0Harmony.dll"
 )
 foreach ($r in $refs) { if (-not (Test-Path $r)) { throw "missing reference: $r" } }
