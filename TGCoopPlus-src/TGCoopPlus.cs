@@ -42,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.6.2";
+        public const string Version = "1.6.3";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -118,6 +118,11 @@ namespace TGCoopPlus
                 if (EnableLegsFix.Value) MaskFix.Apply(_harmony);
             }
             catch (Exception e) { Log.LogError("[MaskFix] failed: " + e); }
+            try
+            {
+                if (EnableLegsFix.Value) AuxLayerFix.Apply(_harmony);
+            }
+            catch (Exception e) { Log.LogError("[AuxLayerFix] failed: " + e); }
             try
             {
                 if (AnimDebug.Value) AnimDebugLog.Apply(_harmony);
@@ -897,6 +902,65 @@ namespace TGCoopPlus
             {
                 LogOnce("err:" + e.Message, "error: " + e.Message);
             }
+        }
+    }
+
+    // =====================================================================================
+    //  2h. AuxLayerFix — auxiliary layers (Tools / Fishing / Spyglass) must not park a full-body
+    //      idle clip at weight 1 above the weapon layers. When such a layer receives Idle/None/Empty
+    //      we fade it out; when it receives a real action we make sure it is back at weight 1.
+    // =====================================================================================
+    internal static class AuxLayerFix
+    {
+        private static FieldInfo _fAnimancer, _fLayerIndices;
+        private static int _logged;
+
+        public static void Apply(Harmony h)
+        {
+            Type puppet = AccessTools.TypeByName("TGCoop.Sync.PuppetAnimancer");
+            if (puppet == null) return;
+            _fAnimancer = AccessTools.Field(puppet, "_animancer");
+            _fLayerIndices = AccessTools.Field(puppet, "_layerIndices");
+            MethodInfo m = AccessTools.Method(puppet, "PlayRemoteState");
+            if (m == null || _fAnimancer == null || _fLayerIndices == null) { Plugin.Log.LogWarning("[AuxLayerFix] members not found; disabled."); return; }
+            h.Patch(m, null, new HarmonyMethod(typeof(AuxLayerFix), "Postfix"));
+            Plugin.Log.LogInfo("[AuxLayerFix] enabled (Tools/Fishing/Spyglass layers fade out on idle).");
+        }
+
+        private static bool IsAux(HeroLayerType l)
+        {
+            return l == HeroLayerType.Tools || l == HeroLayerType.Fishing || l == HeroLayerType.Spyglass
+                || l == HeroLayerType.HeadTools || l == HeroLayerType.HeadFishing || l == HeroLayerType.HeadSpyglass;
+        }
+        private static bool IsIdleLike(HeroStateType s)
+        {
+            return s == HeroStateType.Idle || s == HeroStateType.None || s == HeroStateType.Empty || s == HeroStateType.Invalid || s == HeroStateType.TPose;
+        }
+
+        public static void Postfix(object __instance, object[] __args)
+        {
+            try
+            {
+                if (__args == null || __args.Length < 2 || !(__args[0] is HeroLayerType) || !(__args[1] is HeroStateType)) return;
+                HeroLayerType layer = (HeroLayerType)__args[0];
+                if (!IsAux(layer)) return;
+                HeroStateType state = (HeroStateType)__args[1];
+                var idx = _fLayerIndices.GetValue(__instance) as Dictionary<HeroLayerType, int>;
+                AnimancerComponent ac = _fAnimancer.GetValue(__instance) as AnimancerComponent;
+                int i;
+                if (idx == null || ac == null || !idx.TryGetValue(layer, out i) || i <= 0 || i >= ac.Layers.Count) return;
+                AnimancerLayer al = ac.Layers[i];
+                if (IsIdleLike(state))
+                {
+                    if (al.TargetWeight > 0f) { al.StartFade(0f, 0.15f); if (_logged++ < 20) Plugin.Log.LogInfo("[AuxLayerFix] " + layer + "/" + state + " -> layer " + i + " faded out"); }
+                }
+                else if (al.TargetWeight < 1f)
+                {
+                    al.StartFade(1f, 0.1f);
+                    if (_logged++ < 20) Plugin.Log.LogInfo("[AuxLayerFix] " + layer + "/" + state + " -> layer " + i + " back to weight 1");
+                }
+            }
+            catch (Exception e) { if (_logged++ < 20) Plugin.Log.LogWarning("[AuxLayerFix] " + e.Message); }
         }
     }
 
