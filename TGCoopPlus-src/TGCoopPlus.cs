@@ -42,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.6.0";
+        public const string Version = "1.6.1";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -785,7 +785,27 @@ namespace TGCoopPlus
             return matched > 0 ? m : null;
         }
 
-        public static void Postfix(object __instance, object[] __args, ref AvatarMask __result)
+        private static Type _tPuppet;
+        private static Animator FindPuppetAnimator()
+        {
+            try
+            {
+                if (_tPuppet == null) _tPuppet = AccessTools.TypeByName("TGCoop.Sync.PuppetAnimancer");
+                if (_tPuppet == null || _fAnimancer == null) return null;
+                foreach (UnityEngine.Object o in Resources.FindObjectsOfTypeAll(_tPuppet))
+                {
+                    var mb = o as MonoBehaviour;
+                    if (mb == null || !mb.gameObject.scene.IsValid()) continue;
+                    AnimancerComponent ac = _fAnimancer.GetValue(mb) as AnimancerComponent;
+                    if (ac != null && ac.Animator != null) return ac.Animator;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // GetActionLayerMask is STATIC in TGCoop, so there is no __instance: cache per layer, keyed by the animator we built for.
+        public static void Postfix(object[] __args, ref AvatarMask __result)
         {
             try
             {
@@ -793,13 +813,13 @@ namespace TGCoopPlus
                 HeroLayerType layer = (HeroLayerType)__args[0];
                 if (layer == HeroLayerType.Legs || layer == HeroLayerType.Idle || layer == HeroLayerType.CameraShakes) return;
 
+                Animator anim = FindPuppetAnimator();
+                object key = anim != null ? (object)anim : "no-animator";
                 Dictionary<int, AvatarMask> perLayer;
-                if (!_cache.TryGetValue(__instance, out perLayer)) { perLayer = new Dictionary<int, AvatarMask>(); _cache[__instance] = perLayer; }
+                if (!_cache.TryGetValue(key, out perLayer)) { perLayer = new Dictionary<int, AvatarMask>(); _cache[key] = perLayer; }
                 AvatarMask cached;
                 if (perLayer.TryGetValue((int)layer, out cached) && cached != null) { __result = cached; return; }
 
-                AnimancerComponent ac = _fAnimancer == null ? null : _fAnimancer.GetValue(__instance) as AnimancerComponent;
-                Animator anim = ac != null ? ac.Animator : null;
                 bool human = anim != null && anim.isHuman;
                 AvatarMask tpp = TryGetTpp(layer); if (tpp == null) tpp = TryGetTpp(HeroLayerType.BothHands);
 
