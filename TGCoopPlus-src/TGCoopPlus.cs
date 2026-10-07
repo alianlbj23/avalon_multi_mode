@@ -27,6 +27,8 @@ using Awaken.TG.MVC;
 using Awaken.TG.Main.Heroes;
 using Awaken.TG.Main.Memories;
 using Awaken.TG.Main.Animations.FSM.Heroes.Base;
+using Awaken.TG.Main.Fights.NPCs;
+using Awaken.TG.Main.Fights.DamageInfo;
 
 namespace TGCoopPlus
 {
@@ -36,7 +38,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -48,6 +50,7 @@ namespace TGCoopPlus
         internal static ConfigEntry<bool> EnableAnimFix;
         internal static ConfigEntry<bool> EnableStoryRetry;
         internal static ConfigEntry<bool> EnableHostAuthority;
+        internal static ConfigEntry<bool> EnableSharedKillExp;
         internal static ConfigEntry<bool> AnimDebug;
 
         private Harmony _harmony;
@@ -69,6 +72,8 @@ namespace TGCoopPlus
                 "Hold host quest/flag packets until the world is loaded, then apply them. / 世界未載入時暫存主機的任務狀態，載入後再套用。");
             EnableHostAuthority = Config.Bind("Fixes", "HostAuthority", true,
                 "Progress flows ONLY host -> client: the client never sends quests/flags/story rewards and the host ignores them. / 進度只從主機流向客戶端：客戶端不送任務、旗標、劇情獎勵，主機也忽略它們。");
+            EnableSharedKillExp = Config.Bind("Fixes", "SharedKillExp", true,
+                "When the partner (or a host-confirmed kill) kills an enemy in your world, you also get the kill XP. / 隊友在你的世界殺死敵人時，你也獲得擊殺經驗。");
             AnimDebug = Config.Bind("Debug", "AnimDebug", true,
                 "Log every remote animation state applied to the partner clone (first 300 per session). / 記錄套用到隊友分身的每個遠端動畫狀態（每場前 300 筆）。");
 
@@ -88,6 +93,11 @@ namespace TGCoopPlus
                 if (EnableHostAuthority.Value) HostAuthority.Apply(_harmony);
             }
             catch (Exception e) { Log.LogError("[HostAuthority] failed: " + e); }
+            try
+            {
+                if (EnableSharedKillExp.Value) SharedKillExp.Apply(_harmony);
+            }
+            catch (Exception e) { Log.LogError("[SharedKillExp] failed: " + e); }
             try
             {
                 if (AnimDebug.Value) AnimDebugLog.Apply(_harmony);
@@ -441,6 +451,66 @@ namespace TGCoopPlus
             if (Time.realtimeSinceStartup < _nextReport) return;
             _nextReport = Time.realtimeSinceStartup + 30f;
             Plugin.Log.LogInfo("[HostAuthority] blocked so far: client->host sends=" + _blockedOut + ", host-side applies=" + _blockedIn);
+        }
+    }
+
+    // =====================================================================================
+    //  2d. SharedKillExp — kill XP for kills made by the partner (or confirmed remotely)
+    //      TGCoop applies remote damage/deaths with the partner's proxy NPC as the attacker, so
+    //      NpcElement.ShouldAttributeKillToHero() is false and the game awards no XP. We say "yes"
+    //      whenever the kill came through TGCoop's remote path or the attacker is the proxy.
+    // =====================================================================================
+    internal static class SharedKillExp
+    {
+        private static MethodInfo _getProxyNpc;
+        private static FieldInfo _fRemoteDeath, _fRemoteDamage;
+        private static PropertyInfo _pAttacker;
+        private static int _count;
+
+        public static void Apply(Harmony h)
+        {
+            Type ally = AccessTools.TypeByName("TGCoop.Sync.AllyBody");
+            Type combat = AccessTools.TypeByName("TGCoop.Sync.CombatSync");
+            if (ally != null) _getProxyNpc = AccessTools.Method(ally, "get_CurrentNpc");
+            if (combat != null)
+            {
+                _fRemoteDeath = AccessTools.Field(combat, "_applyingRemoteDeath");
+                _fRemoteDamage = AccessTools.Field(combat, "_applyingRemoteDamage");
+            }
+            MethodInfo target = AccessTools.Method(typeof(NpcElement), "ShouldAttributeKillToHero");
+            if (target == null) { Plugin.Log.LogWarning("[SharedKillExp] NpcElement.ShouldAttributeKillToHero not found; disabled."); return; }
+            h.Patch(target, null, new HarmonyMethod(typeof(SharedKillExp), "Postfix"));
+            Plugin.Log.LogInfo("[SharedKillExp] enabled (proxy=" + (_getProxyNpc != null) + ", flags=" + (_fRemoteDeath != null && _fRemoteDamage != null) + ").");
+        }
+
+        private static bool Flag(FieldInfo f)
+        {
+            try { return f != null && (bool)f.GetValue(null); } catch { return false; }
+        }
+
+        public static void Postfix(object[] __args, ref bool __result)
+        {
+            if (__result) return;
+            try
+            {
+                bool remote = Flag(_fRemoteDeath) || Flag(_fRemoteDamage);
+                if (!remote && _getProxyNpc != null && __args != null && __args.Length > 0 && __args[0] != null)
+                {
+                    if (_pAttacker == null) _pAttacker = AccessTools.Property(__args[0].GetType(), "AttackerPure");
+                    object proxy = _getProxyNpc.Invoke(null, null);
+                    object attacker = _pAttacker == null ? null : _pAttacker.GetValue(__args[0], null);
+                    if (proxy != null && attacker != null && ReferenceEquals(attacker, proxy)) remote = true;
+                }
+                if (!remote) return;
+                __result = true;
+                _count++;
+                if (_count <= 20 || _count % 50 == 0)
+                    Plugin.Log.LogInfo("[SharedKillExp] partner kill attributed to you for XP (#" + _count + ").");
+            }
+            catch (Exception e)
+            {
+                if (_count == 0) Plugin.Log.LogWarning("[SharedKillExp] " + e.Message);
+            }
         }
     }
 

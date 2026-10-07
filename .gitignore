@@ -4,3 +4,5 @@ BepInEx/LogOutput.log*
 BepInEx/config/
 BepInEx/cache/
 *.tmp
+launcher_log.txt
+game_path.txt

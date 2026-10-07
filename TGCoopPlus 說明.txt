@@ -1,4 +1,4 @@
-TGCoopPlus 1.1.0 — TGCoop 0.5.36 的補丁外掛
+TGCoopPlus 1.2.0 — TGCoop 0.5.36 的補丁外掛
 ==========================================
 
 這個 ZIP 裡的 BepInEx\plugins\TGCoopPlus.dll 是額外的補丁，兩個人都要裝（用 install_TGCoop.bat 會自動一起裝）。
@@ -39,6 +39,14 @@ TGCoopPlus 1.1.0 — TGCoop 0.5.36 的補丁外掛
    AnimLayerFix   true/false
    StoryRetry     true/false
 
+5. 共享擊殺經驗（SharedKillExp）
+   原本隊友（或主機確認的遠端擊殺）在你的世界殺死敵人時，攻擊者是「隊友代理 NPC」，遊戲不會發經驗給你。
+   補丁把這種擊殺視為你的擊殺，所以兩邊都拿得到經驗。log 會有：
+     [SharedKillExp] partner kill attributed to you for XP
+
+每次開遊戲請用 play_TGCoop.bat（或桌面捷徑「TGCoop 啟動遊戲」）：
+   它會先到 GitHub 檢查有沒有新版，有就自動更新模組，再啟動遊戲。兩個人都用它，版本就不會不同步。
+   連不上 GitHub 時直接用目前版本啟動。更新紀錄在 launcher_log.txt。
 快速自我測試（不用隊友）：載入存檔後按 F8 開「幽靈模式」，會生成一個自己的分身跟著你，
 分身有走路動作就代表 T-pose 修好了；再按一次 F8 關閉。
 
