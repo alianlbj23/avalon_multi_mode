@@ -42,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.5.0";
+        public const string Version = "1.6.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -706,46 +706,123 @@ namespace TGCoopPlus
     // =====================================================================================
     internal static class MaskFix
     {
-        private static readonly HashSet<int> _logged = new HashSet<int>();
+        private static FieldInfo _fAnimancer;
+        private static readonly Dictionary<object, Dictionary<int, AvatarMask>> _cache = new Dictionary<object, Dictionary<int, AvatarMask>>();
+        private static readonly HashSet<string> _logged = new HashSet<string>();
 
         public static void Apply(Harmony h)
         {
             Type puppet = AccessTools.TypeByName("TGCoop.Sync.PuppetAnimancer");
             MethodInfo m = puppet == null ? null : AccessTools.Method(puppet, "GetActionLayerMask");
             if (m == null) { Plugin.Log.LogWarning("[MaskFix] PuppetAnimancer.GetActionLayerMask not found; disabled."); return; }
+            _fAnimancer = AccessTools.Field(puppet, "_animancer");
             h.Patch(m, null, new HarmonyMethod(typeof(MaskFix), "Postfix"));
-            Plugin.Log.LogInfo("[MaskFix] enabled (third-person masks for all upper-body layers).");
+            Plugin.Log.LogInfo("[MaskFix] enabled (runtime upper-body masks for the clone).");
         }
 
-        private static bool IsTpp(AvatarMask mask)
+        private static void LogOnce(string key, string msg) { if (_logged.Add(key)) Plugin.Log.LogInfo("[MaskFix] " + msg); }
+
+        private static AvatarMask TryGetTpp(HeroLayerType layer)
         {
-            return mask != null && mask.name != null && mask.name.IndexOf("TPP", StringComparison.OrdinalIgnoreCase) >= 0;
+            try { var refs = Awaken.TG.Main.Scenes.SceneConstructors.CommonReferences.Get; return refs == null ? null : refs.GetTppMask(layer); }
+            catch { return null; }
         }
 
-        public static void Postfix(object[] __args, ref AvatarMask __result)
+        private static bool IsLeftLayer(HeroLayerType l) { return l == HeroLayerType.OffHand || l == HeroLayerType.DualOffHand || l == HeroLayerType.ActiveOffHand || l == HeroLayerType.HeadOffHand; }
+        private static bool IsRightLayer(HeroLayerType l) { return l == HeroLayerType.MainHand || l == HeroLayerType.DualMainHand || l == HeroLayerType.ActiveMainHand || l == HeroLayerType.HeadMainHand; }
+
+        private static string Describe(AvatarMask m)
+        {
+            if (m == null) return "null";
+            var parts = new List<string>();
+            try { for (int i = 0; i < (int)AvatarMaskBodyPart.LastBodyPart; i++) if (m.GetHumanoidBodyPartActive((AvatarMaskBodyPart)i)) parts.Add(((AvatarMaskBodyPart)i).ToString()); } catch { }
+            return m.name + " [transforms=" + m.transformCount + ", humanoid=" + string.Join(",", parts.ToArray()) + "]";
+        }
+
+        // Humanoid rig: describe the mask by body parts (rig independent).
+        private static AvatarMask BuildHumanoid(HeroLayerType layer)
+        {
+            var m = new AvatarMask();
+            m.name = "TGCoopPlus_" + layer;
+            for (int i = 0; i < (int)AvatarMaskBodyPart.LastBodyPart; i++) m.SetHumanoidBodyPartActive((AvatarMaskBodyPart)i, false);
+            bool left = IsLeftLayer(layer), right = IsRightLayer(layer);
+            if (!left && !right)   // two-handed, hidden weapons, tools, fishing, spyglass, overrides...
+            {
+                m.SetHumanoidBodyPartActive(AvatarMaskBodyPart.Body, true);
+                left = true; right = true;
+            }
+            if (left) { m.SetHumanoidBodyPartActive(AvatarMaskBodyPart.LeftArm, true); m.SetHumanoidBodyPartActive(AvatarMaskBodyPart.LeftFingers, true); }
+            if (right) { m.SetHumanoidBodyPartActive(AvatarMaskBodyPart.RightArm, true); m.SetHumanoidBodyPartActive(AvatarMaskBodyPart.RightFingers, true); }
+            return m;
+        }
+
+        // Generic rig: take the game's TPP mask and re-root its bone paths onto the clone hierarchy by bone name.
+        private static AvatarMask BuildRerooted(HeroLayerType layer, AvatarMask tpp, Animator anim, out int matched, out int wanted)
+        {
+            matched = 0; wanted = 0;
+            if (tpp == null || anim == null || tpp.transformCount == 0) return null;
+            var m = new AvatarMask();
+            m.name = "TGCoopPlus_" + layer + "_rerooted";
+            m.AddTransformPath(anim.transform, true);
+            var byName = new Dictionary<string, List<int>>();
+            for (int i = 0; i < m.transformCount; i++)
+            {
+                m.SetTransformActive(i, false);
+                string p = m.GetTransformPath(i); if (string.IsNullOrEmpty(p)) continue;
+                string n = p.Substring(p.LastIndexOf('/') + 1);
+                List<int> l; if (!byName.TryGetValue(n, out l)) { l = new List<int>(); byName[n] = l; }
+                l.Add(i);
+            }
+            for (int j = 0; j < tpp.transformCount; j++)
+            {
+                if (!tpp.GetTransformActive(j)) continue;
+                wanted++;
+                string p = tpp.GetTransformPath(j); if (string.IsNullOrEmpty(p)) continue;
+                string n = p.Substring(p.LastIndexOf('/') + 1);
+                List<int> l;
+                if (byName.TryGetValue(n, out l)) { foreach (int idx in l) m.SetTransformActive(idx, true); matched++; }
+            }
+            return matched > 0 ? m : null;
+        }
+
+        public static void Postfix(object __instance, object[] __args, ref AvatarMask __result)
         {
             try
             {
-                if (IsTpp(__result)) return;
                 if (__args == null || __args.Length < 1 || !(__args[0] is HeroLayerType)) return;
                 HeroLayerType layer = (HeroLayerType)__args[0];
-                if (layer == HeroLayerType.Legs || layer == HeroLayerType.Idle) return;   // legs: base layer; Idle: head-only mask is fine
+                if (layer == HeroLayerType.Legs || layer == HeroLayerType.Idle || layer == HeroLayerType.CameraShakes) return;
 
-                var refs = Awaken.TG.Main.Scenes.SceneConstructors.CommonReferences.Get;
-                if (refs == null) return;
-                AvatarMask tpp = refs.GetTppMask(layer);
-                string via = "GetTppMask(" + layer + ")";
-                if (tpp == null) { tpp = refs.GetTppMask(HeroLayerType.BothHands); via = "GetTppMask(BothHands)"; }
-                if (tpp == null) return;
+                Dictionary<int, AvatarMask> perLayer;
+                if (!_cache.TryGetValue(__instance, out perLayer)) { perLayer = new Dictionary<int, AvatarMask>(); _cache[__instance] = perLayer; }
+                AvatarMask cached;
+                if (perLayer.TryGetValue((int)layer, out cached) && cached != null) { __result = cached; return; }
 
-                string before = __result == null ? "null" : __result.name;
-                __result = tpp;
-                if (_logged.Add((int)layer))
-                    Plugin.Log.LogInfo("[MaskFix] layer " + layer + ": " + before + " -> " + tpp.name + " via " + via);
+                AnimancerComponent ac = _fAnimancer == null ? null : _fAnimancer.GetValue(__instance) as AnimancerComponent;
+                Animator anim = ac != null ? ac.Animator : null;
+                bool human = anim != null && anim.isHuman;
+                AvatarMask tpp = TryGetTpp(layer); if (tpp == null) tpp = TryGetTpp(HeroLayerType.BothHands);
+
+                LogOnce("info:" + layer, "layer " + layer + ": original=" + Describe(__result) + " gameTpp=" + Describe(tpp) + " animator.isHuman=" + human);
+
+                AvatarMask built = null;
+                string how = "";
+                if (human) { built = BuildHumanoid(layer); how = "humanoid body parts"; }
+                else
+                {
+                    int matched, wanted;
+                    built = BuildRerooted(layer, tpp, anim, out matched, out wanted);
+                    how = "re-rooted TPP mask (" + matched + "/" + wanted + " bones matched)";
+                }
+                if (built == null) { LogOnce("keep:" + layer, "layer " + layer + ": no usable mask built, keeping " + (__result == null ? "null" : __result.name)); return; }
+
+                perLayer[(int)layer] = built;
+                __result = built;
+                LogOnce("use:" + layer, "layer " + layer + ": -> " + Describe(built) + " via " + how);
             }
             catch (Exception e)
             {
-                if (_logged.Add(-1)) Plugin.Log.LogWarning("[MaskFix] " + e.Message);
+                LogOnce("err:" + e.Message, "error: " + e.Message);
             }
         }
     }
