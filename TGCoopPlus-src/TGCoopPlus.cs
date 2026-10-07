@@ -38,7 +38,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.2.0";
+        public const string Version = "1.3.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -76,6 +76,9 @@ namespace TGCoopPlus
                 "When the partner (or a host-confirmed kill) kills an enemy in your world, you also get the kill XP. / 隊友在你的世界殺死敵人時，你也獲得擊殺經驗。");
             AnimDebug = Config.Bind("Debug", "AnimDebug", true,
                 "Log every remote animation state applied to the partner clone (first 300 per session). / 記錄套用到隊友分身的每個遠端動畫狀態（每場前 300 筆）。");
+
+            try { BepInEx.Logging.Logger.Listeners.Add(new ErrorWatcher()); }
+            catch (Exception e) { Log.LogWarning("[ErrorWatcher] could not attach: " + e.Message); }
 
             _harmony = new Harmony(Guid);
             try
@@ -544,12 +547,87 @@ namespace TGCoopPlus
     }
 
     // =====================================================================================
+    //  2e. ErrorWatcher — count TGCoop / TGCoopPlus errors, keep the last few, export diagnostics
+    // =====================================================================================
+    internal class ErrorWatcher : ILogListener
+    {
+        public static int Errors, Warnings;
+        public static readonly List<string> Recent = new List<string>();
+        public static string LastError = "";
+        public static float LastErrorAt = -999f;
+        private const int Keep = 6;
+
+        public void LogEvent(object sender, LogEventArgs e)
+        {
+            try
+            {
+                if (e == null || e.Source == null) return;
+                string src = e.Source.SourceName ?? "";
+                if (src.IndexOf("TGCoop", StringComparison.OrdinalIgnoreCase) < 0) return;
+                if ((e.Level & (LogLevel.Error | LogLevel.Fatal)) != 0)
+                {
+                    Errors++;
+                    string line = src + ": " + (e.Data == null ? "" : e.Data.ToString());
+                    int nl = line.IndexOf('\n'); if (nl > 0) line = line.Substring(0, nl);
+                    if (line.Length > 160) line = line.Substring(0, 160) + "…";
+                    lock (Recent)
+                    {
+                        if (Recent.Count == 0 || Recent[Recent.Count - 1] != line) { Recent.Add(line); if (Recent.Count > Keep) Recent.RemoveAt(0); }
+                    }
+                    LastError = line; LastErrorAt = Time.realtimeSinceStartup;
+                }
+                else if ((e.Level & LogLevel.Warning) != 0) Warnings++;
+            }
+            catch { }
+        }
+
+        public void Dispose() { }
+
+        public static void Clear() { Errors = 0; Warnings = 0; lock (Recent) Recent.Clear(); LastError = ""; }
+
+        /// Copy LogOutput.log + configs + a summary into Desktop\TGCoop_diag_<time>\ and return the folder.
+        public static string ExportDiagnostics()
+        {
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string dir = System.IO.Path.Combine(desktop, "TGCoop_diag_" + DateTime.Now.ToString("yyyyMMdd_HHmm"));
+            System.IO.Directory.CreateDirectory(dir);
+            string log = System.IO.Path.Combine(Paths.BepInExRootPath, "LogOutput.log");
+            if (System.IO.File.Exists(log))
+            {
+                // the file is open for writing by BepInEx; copy via shared read
+                using (var fs = new System.IO.FileStream(log, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite))
+                using (var outFs = new System.IO.FileStream(System.IO.Path.Combine(dir, "LogOutput.log"), System.IO.FileMode.Create))
+                    fs.CopyTo(outFs);
+            }
+            if (System.IO.Directory.Exists(Paths.ConfigPath))
+                foreach (string cfg in System.IO.Directory.GetFiles(Paths.ConfigPath, "*.cfg"))
+                    System.IO.File.Copy(cfg, System.IO.Path.Combine(dir, System.IO.Path.GetFileName(cfg)), true);
+            string verFile = System.IO.Path.Combine(Paths.BepInExRootPath, "tgcoop_version.txt");
+            string kitVer = System.IO.File.Exists(verFile) ? System.IO.File.ReadAllText(verFile).Trim() : "(none)";
+            string me = ""; try { me = SteamFriends.GetPersonaName() + " (" + SteamUser.GetSteamID().m_SteamID + ")"; } catch { }
+            string role = !Coop.InLobby ? "not connected" : (Coop.IsHost ? "HOST" : "CLIENT");
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("TGCoop diagnostics  " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            sb.AppendLine("Player: " + me);
+            sb.AppendLine("Role: " + role + "   Connected: " + Coop.Connected);
+            sb.AppendLine("TGCoopPlus: " + Plugin.Version + "   kit commit: " + kitVer);
+            sb.AppendLine("Game version: " + Application.version + "   Unity: " + Application.unityVersion);
+            sb.AppendLine("Errors: " + Errors + "   Warnings: " + Warnings);
+            sb.AppendLine("Recent errors:");
+            lock (Recent) foreach (string r in Recent) sb.AppendLine("  " + r);
+            System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "summary.txt"), sb.ToString());
+            Plugin.Log.LogInfo("[ErrorWatcher] diagnostics exported to " + dir);
+            return dir;
+        }
+    }
+
+    // =====================================================================================
     //  3. Panel — IMGUI window for host / client control
     // =====================================================================================
     internal static class Panel
     {
         private static bool _open;
-        private static Rect _rect = new Rect(40, 120, 460, 420);
+        private static Rect _rect = new Rect(40, 100, 520, 560);
         private static Font _font;
         private static bool _fontTried;
         private static string _status = "";
@@ -616,10 +694,23 @@ namespace TGCoopPlus
 
         public static void Draw()
         {
-            if (!_open) return;
             EnsureFont();
             Font prev = GUI.skin.font;
             if (_font != null) GUI.skin.font = _font;
+            if (!_open)
+            {
+                // small banner so errors are noticed even with the panel closed
+                bool fresh = Time.realtimeSinceStartup - ErrorWatcher.LastErrorAt < 12f;
+                if (ErrorWatcher.Errors > 0 && (fresh || Time.realtimeSinceStartup % 30f < 6f))
+                {
+                    GUI.color = new Color(1f, 0.45f, 0.4f);
+                    string txt = T("TGCoop 錯誤 ", "TGCoop errors ") + ErrorWatcher.Errors + (fresh ? "  |  " + ErrorWatcher.LastError : "") + T("   （" + Plugin.PanelKey.Value + " 開面板）", "   (" + Plugin.PanelKey.Value + " for panel)");
+                    GUI.Label(new Rect(10, 8, Screen.width - 20, 24), txt);
+                    GUI.color = Color.white;
+                }
+                GUI.skin.font = prev;
+                return;
+            }
             _rect = GUILayout.Window(0x7C00, _rect, Body, T("TGCoop 連線面板  (" + Plugin.PanelKey.Value + " 關閉)", "TGCoop co-op panel  (" + Plugin.PanelKey.Value + " to close)"));
             GUI.skin.font = prev;
         }
@@ -717,6 +808,25 @@ namespace TGCoopPlus
             if (Coop.InLobby && GUILayout.Button(T("離開連線", "Leave session"), GUILayout.Height(28)))
             { Coop.Leave(); Flash(T("已離開。", "Left the session.")); }
             GUI.enabled = true;
+
+            // ---- errors / diagnostics ----
+            GUILayout.Space(6);
+            if (ErrorWatcher.Errors > 0)
+            {
+                GUI.color = new Color(1f, 0.6f, 0.55f);
+                GUILayout.Label(T("錯誤 ", "Errors ") + ErrorWatcher.Errors + T("、警告 ", ", warnings ") + ErrorWatcher.Warnings + T("。最近：", ". Recent:"));
+                lock (ErrorWatcher.Recent) foreach (string r in ErrorWatcher.Recent) GUILayout.Label("  " + r);
+                GUI.color = Color.white;
+            }
+            else GUILayout.Label(T("目前沒有 TGCoop 錯誤。", "No TGCoop errors so far."));
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(T("匯出診斷到桌面（log + 設定）", "Export diagnostics to Desktop"), GUILayout.Height(28)))
+            {
+                try { string dir = ErrorWatcher.ExportDiagnostics(); Flash(T("已匯出：", "Exported: ") + dir); }
+                catch (Exception e) { Flash(T("匯出失敗：", "Export failed: ") + e.Message); }
+            }
+            if (ErrorWatcher.Errors > 0 && GUILayout.Button(T("清除", "Clear"), GUILayout.Width(70), GUILayout.Height(28))) ErrorWatcher.Clear();
+            GUILayout.EndHorizontal();
 
             // ---- footer ----
             GUILayout.FlexibleSpace();

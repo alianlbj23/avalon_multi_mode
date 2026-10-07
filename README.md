@@ -18,6 +18,10 @@
 - 強制重裝：`play_TGCoop.bat -ForceUpdate`；只更新不開遊戲：`play_TGCoop.bat -NoLaunch`。
 - 更新紀錄在 `launcher_log.txt`。
 
+## 兩人實測
+
+照 [測試流程.md](測試流程.md) 跑一遍（約 15 分鐘），出問題時兩人都按面板的「匯出診斷到桌面」，把資料夾傳回來。
+
 ## 遊玩
 
 - 兩人都先**載入存檔**，再連線。
@@ -34,6 +38,7 @@
 | HostAuthority | 切斷客戶端 → 主機的任務、旗標、劇情獎勵同步，避免主機被動完成任務而經驗暴漲。 |
 | Panel | `Insert` 開啟的連線面板，可設定主機 / 客戶端、建房、邀請、加入好友房間、要求重新同步。 |
 | SharedKillExp | 隊友（或主機確認的遠端擊殺）在你的世界殺死敵人時，你也獲得擊殺經驗。原本遠端擊殺的攻擊者是代理 NPC，遊戲不發經驗。 |
+| ErrorWatcher | 畫面上方紅字提示 TGCoop 錯誤數，面板列出最近幾筆，一鍵把 log 與設定匯出到桌面 `TGCoop_diag_時間` 資料夾。 |
 | AnimDebug | 記錄套用到隊友分身的遠端動畫狀態，方便除錯。 |
 
 設定檔：`BepInEx\config\com.tgcoop.plus.cfg`。
@@ -52,5 +57,5 @@ powershell -ExecutionPolicy Bypass -File TGCoopPlus-src\build.ps1
 
 - 遊戲 build 25629220
 - TGCoop 0.5.36（原作者的閉源模組，`LEEME-TGCoop.txt` 為原始說明）
-- TGCoopPlus 1.2.0
+- TGCoopPlus 1.3.0
 - BepInEx 5.4.23.3
