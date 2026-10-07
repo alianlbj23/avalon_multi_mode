@@ -131,10 +131,20 @@ if ($needUpdate) {
         Copy-Item -LiteralPath (Join-Path $src "BepInEx\plugins") -Destination (Join-Path $GameDir "BepInEx") -Recurse -Force
         Set-Content -LiteralPath $VersionFile -Value $remoteSha -Encoding ASCII
 
-        # 也更新啟動器 / 安裝程式自己（這個資料夾），下次就是新版腳本
-        foreach ($f in @("install_TGCoop.bat", "install_tgcoop.ps1", "play_TGCoop.bat", "launch_tgcoop.ps1", "README.md", "TGCoopPlus 說明.txt")) {
+        # 也更新這個資料夾裡的腳本與說明，下次就是新版。
+        # 注意：不能覆蓋正在執行中的 .bat（cmd 是邊讀邊執行），所以 .bat 只在內容不同時另存為 .new，
+        # 由 play_TGCoop.bat 在下一次啟動前自行換掉。
+        foreach ($f in @("install_tgcoop.ps1", "launch_tgcoop.ps1", "README.md", "TGCoopPlus 說明.txt")) {
             $sf = Join-Path $src $f
             if (Test-Path -LiteralPath $sf) { try { Copy-Item -LiteralPath $sf -Destination $Kit -Force } catch {} }
+        }
+        foreach ($f in @("install_TGCoop.bat", "play_TGCoop.bat")) {
+            $sf = Join-Path $src $f; $df = Join-Path $Kit $f
+            if (-not (Test-Path -LiteralPath $sf)) { continue }
+            try {
+                $same = (Test-Path -LiteralPath $df) -and ((Get-FileHash -LiteralPath $sf -Algorithm MD5).Hash -eq (Get-FileHash -LiteralPath $df -Algorithm MD5).Hash)
+                if (-not $same) { Copy-Item -LiteralPath $sf -Destination ($df + ".new") -Force }
+            } catch {}
         }
         Log ("[v] 更新完成 → " + $remoteSha.Substring(0,7)) Green
     } catch {
@@ -150,14 +160,16 @@ if ($needUpdate) {
 try {
     $desktop = [Environment]::GetFolderPath("Desktop")
     $lnk = Join-Path $desktop "TGCoop 啟動遊戲.lnk"
+    $tmpLnk = Join-Path $desktop "TGCoop_Launcher.lnk"   # WScript.Shell 存檔時用 ANSI，中文檔名會失敗，先用英文名建立再改名
     $bat = Join-Path $Kit "play_TGCoop.bat"
     if (-not (Test-Path -LiteralPath $lnk) -and (Test-Path -LiteralPath $bat)) {
         $ws = New-Object -ComObject WScript.Shell
-        $s = $ws.CreateShortcut($lnk)
+        $s = $ws.CreateShortcut($tmpLnk)
         $s.TargetPath = $bat
         $s.WorkingDirectory = $Kit
         $s.IconLocation = (Join-Path $GameDir $GameExe) + ",0"
         $s.Save()
+        Move-Item -LiteralPath $tmpLnk -Destination $lnk -Force
         Log "[v] 已在桌面建立捷徑「TGCoop 啟動遊戲」。" Green
     }
 } catch {}

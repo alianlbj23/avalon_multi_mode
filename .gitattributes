@@ -1,0 +1,11 @@
+# Windows scripts must keep CRLF so cmd.exe parses them reliably
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.ini text eol=crlf
+*.txt text eol=crlf
+*.md text eol=lf
+*.cs text eol=crlf
+# binaries
+*.dll binary
+*.xml text
