@@ -42,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.6.1";
+        public const string Version = "1.6.2";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -756,6 +756,51 @@ namespace TGCoopPlus
             return m;
         }
 
+        private static readonly System.Text.RegularExpressions.Regex LowerBody = new System.Text.RegularExpressions.Regex(
+            "thigh|calf|shin|knee|foot|toe|leg|pelvis|hips?$|^root$|^hips?_|_hips?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        private static readonly System.Text.RegularExpressions.Regex LeftSide = new System.Text.RegularExpressions.Regex(
+            "(^|[_\\.\\s])(l|left)([_\\.\\s]|$)|left|_l$|^l_", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        private static readonly System.Text.RegularExpressions.Regex RightSide = new System.Text.RegularExpressions.Regex(
+            "(^|[_\\.\\s])(r|right)([_\\.\\s]|$)|right|_r$|^r_", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        private static readonly System.Text.RegularExpressions.Regex ArmBone = new System.Text.RegularExpressions.Regex(
+            "clavicle|shoulder|upperarm|forearm|arm|elbow|hand|finger|thumb|index|middle|ring|pinky|wrist|weapon|socket", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        private static readonly HashSet<string> _dumped = new HashSet<string>();
+
+        // Generic rig: copy the paths of a mask that is known to match the clone (the sender's FPP mask) and
+        // keep only the upper body. Returns null when the source has no transform paths.
+        private static AvatarMask BuildFromWorkingMask(HeroLayerType layer, AvatarMask src, out int kept, out int dropped)
+        {
+            kept = 0; dropped = 0;
+            if (src == null || src.transformCount == 0) return null;
+            bool left = IsLeftLayer(layer), right = IsRightLayer(layer);
+            bool both = !left && !right;
+            var m = new AvatarMask();
+            m.name = "TGCoopPlus_" + layer + "_upper";
+            int n = src.transformCount;
+            m.transformCount = n;
+            var dump = new System.Text.StringBuilder();
+            for (int i = 0; i < n; i++)
+            {
+                string path = src.GetTransformPath(i) ?? "";
+                bool active = src.GetTransformActive(i);
+                m.SetTransformPath(i, path);
+                string leaf = path.Substring(path.LastIndexOf('/') + 1);
+                bool on = active;
+                if (on && LowerBody.IsMatch(leaf)) on = false;
+                if (on && !both && ArmBone.IsMatch(leaf))
+                {
+                    bool isL = LeftSide.IsMatch(leaf), isR = RightSide.IsMatch(leaf);
+                    if (left && isR && !isL) on = false;
+                    if (right && isL && !isR) on = false;
+                }
+                m.SetTransformActive(i, on);
+                if (on) kept++; else if (active) dropped++;
+                if (_dumped.Count == 0) dump.Append(leaf).Append(active ? "" : "(off)").Append(on ? "" : "[cut]").Append(' ');
+            }
+            if (_dumped.Add("src")) Plugin.Log.LogInfo("[MaskFix] source mask '" + src.name + "' leaves: " + dump);
+            return kept > 0 ? m : null;
+        }
+
         // Generic rig: take the game's TPP mask and re-root its bone paths onto the clone hierarchy by bone name.
         private static AvatarMask BuildRerooted(HeroLayerType layer, AvatarMask tpp, Animator anim, out int matched, out int wanted)
         {
@@ -830,9 +875,17 @@ namespace TGCoopPlus
                 if (human) { built = BuildHumanoid(layer); how = "humanoid body parts"; }
                 else
                 {
-                    int matched, wanted;
-                    built = BuildRerooted(layer, tpp, anim, out matched, out wanted);
-                    how = "re-rooted TPP mask (" + matched + "/" + wanted + " bones matched)";
+                    // Generic rig. The sender's first-person mask is KNOWN to drive the clone's arms (its paths match),
+                    // so copy its paths and switch off legs / pelvis / root (and the other arm for one-hand layers).
+                    int kept, dropped;
+                    built = BuildFromWorkingMask(layer, __result, out kept, out dropped);
+                    how = "copy of " + (__result == null ? "null" : __result.name) + " minus lower body (" + kept + " on, " + dropped + " off)";
+                    if (built == null)
+                    {
+                        int matched, wanted;
+                        built = BuildRerooted(layer, tpp, anim, out matched, out wanted);
+                        how = "re-rooted TPP mask (" + matched + "/" + wanted + " bones matched)";
+                    }
                 }
                 if (built == null) { LogOnce("keep:" + layer, "layer " + layer + ": no usable mask built, keeping " + (__result == null ? "null" : __result.name)); return; }
 

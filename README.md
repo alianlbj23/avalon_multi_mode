@@ -57,5 +57,5 @@ powershell -ExecutionPolicy Bypass -File TGCoopPlus-src\build.ps1
 
 - 遊戲 build 25629220
 - TGCoop 0.5.36（原作者的閉源模組，`LEEME-TGCoop.txt` 為原始說明）
-- TGCoopPlus 1.6.1
+- TGCoopPlus 1.6.2
 - BepInEx 5.4.23.3
