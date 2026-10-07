@@ -1,4 +1,4 @@
-TGCoopPlus 1.4.0 — TGCoop 0.5.36 的補丁外掛
+TGCoopPlus 1.5.0 — TGCoop 0.5.36 的補丁外掛
 ==========================================
 
 這個 ZIP 裡的 BepInEx\plugins\TGCoopPlus.dll 是額外的補丁，兩個人都要裝（用 install_TGCoop.bat 會自動一起裝）。

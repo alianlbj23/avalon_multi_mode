@@ -42,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.4.0";
+        public const string Version = "1.5.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -113,6 +113,11 @@ namespace TGCoopPlus
                 if (EnableLegsFix.Value) LegsFix.Apply(_harmony);
             }
             catch (Exception e) { Log.LogError("[LegsFix] failed: " + e); }
+            try
+            {
+                if (EnableLegsFix.Value) MaskFix.Apply(_harmony);
+            }
+            catch (Exception e) { Log.LogError("[MaskFix] failed: " + e); }
             try
             {
                 if (AnimDebug.Value) AnimDebugLog.Apply(_harmony);
@@ -689,6 +694,59 @@ namespace TGCoopPlus
                 }
             }
             catch (Exception e) { if (_diagLines < MaxDiag) { _diagLines++; Plugin.Log.LogWarning("[LegsFix] postfix: " + e.Message); } }
+        }
+    }
+
+    // =====================================================================================
+    //  2g. MaskFix — upper-body layers must not cover the legs
+    //      TGCoop asks the game only for the MainHand/OffHand third-person masks. For every other
+    //      weapon layer (two-handed, hidden weapons, tools, fishing...) it falls back to the sender's
+    //      FIRST-person mask "Mask_AllExceptHead", which covers the legs and freezes them at weight 1
+    //      -> the clone slides. We substitute the game's third-person masks (CommonReferences.GetTppMask).
+    // =====================================================================================
+    internal static class MaskFix
+    {
+        private static readonly HashSet<int> _logged = new HashSet<int>();
+
+        public static void Apply(Harmony h)
+        {
+            Type puppet = AccessTools.TypeByName("TGCoop.Sync.PuppetAnimancer");
+            MethodInfo m = puppet == null ? null : AccessTools.Method(puppet, "GetActionLayerMask");
+            if (m == null) { Plugin.Log.LogWarning("[MaskFix] PuppetAnimancer.GetActionLayerMask not found; disabled."); return; }
+            h.Patch(m, null, new HarmonyMethod(typeof(MaskFix), "Postfix"));
+            Plugin.Log.LogInfo("[MaskFix] enabled (third-person masks for all upper-body layers).");
+        }
+
+        private static bool IsTpp(AvatarMask mask)
+        {
+            return mask != null && mask.name != null && mask.name.IndexOf("TPP", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        public static void Postfix(object[] __args, ref AvatarMask __result)
+        {
+            try
+            {
+                if (IsTpp(__result)) return;
+                if (__args == null || __args.Length < 1 || !(__args[0] is HeroLayerType)) return;
+                HeroLayerType layer = (HeroLayerType)__args[0];
+                if (layer == HeroLayerType.Legs || layer == HeroLayerType.Idle) return;   // legs: base layer; Idle: head-only mask is fine
+
+                var refs = Awaken.TG.Main.Scenes.SceneConstructors.CommonReferences.Get;
+                if (refs == null) return;
+                AvatarMask tpp = refs.GetTppMask(layer);
+                string via = "GetTppMask(" + layer + ")";
+                if (tpp == null) { tpp = refs.GetTppMask(HeroLayerType.BothHands); via = "GetTppMask(BothHands)"; }
+                if (tpp == null) return;
+
+                string before = __result == null ? "null" : __result.name;
+                __result = tpp;
+                if (_logged.Add((int)layer))
+                    Plugin.Log.LogInfo("[MaskFix] layer " + layer + ": " + before + " -> " + tpp.name + " via " + via);
+            }
+            catch (Exception e)
+            {
+                if (_logged.Add(-1)) Plugin.Log.LogWarning("[MaskFix] " + e.Message);
+            }
         }
     }
 
