@@ -1,0 +1,51 @@
+TGCoop — Mod cooperativo para Tainted Grail: The Fall of Avalon
+================================================================
+
+INSTALACIÓN (2 minutos):
+
+1. Localiza tu carpeta del juego:
+   Steam → clic derecho en el juego → Administrar → Ver archivos locales.
+   (Normalmente: C:\Program Files (x86)\Steam\steamapps\common\Tainted Grail FoA)
+
+2. Copia TODO el contenido de este ZIP dentro de esa carpeta,
+   mezclando con lo que hay (te preguntará si combinar carpetas: sí).
+   Debe quedar:
+     <juego>\winhttp.dll
+     <juego>\doorstop_config.ini
+     <juego>\BepInEx\core\...
+     <juego>\BepInEx\plugins\TGCoop.dll
+
+3. Arranca el juego una vez y ciérralo. Comprueba que existe el archivo
+   <juego>\BepInEx\LogOutput.log y que dentro aparece la línea:
+     Loading [TGCoop ...]
+   Si aparece, listo.
+
+JUGAR EN COOPERATIVO:
+
+- Ambos tenéis que tener el juego abierto CON UNA PARTIDA CARGADA
+  (cada uno la suya, con su personaje).
+- El anfitrión pulsa F7 → se abre la ventana de Steam para invitar.
+- Tú aceptas la invitación desde Steam → te unes automáticamente y
+  tu personaje se teletransporta junto al anfitrión.
+
+TECLAS (¡ojo! F9 y F5 son carga/guardado rápido DEL JUEGO):
+  F7  = crear lobby / invitar (anfitrión)
+  F4  = VIAJAR JUNTO AL COMPAÑERO (misma zona: teleport a su lado;
+        otra zona: cambio de mapa a donde esté él)
+  F10 = salir de la sesión
+  F11 = ping de prueba (mide la latencia, sale en el log)
+  H   = mantener 5 s cerca del compañero derribado para levantarlo
+  F2 / F6 = aceptar / rechazar misión propuesta por el compañero
+  F6  = también cancela una conversación espejada que estés viendo
+  (Se pueden cambiar en BepInEx\config\com.tgcoop.core.cfg)
+
+NOTAS:
+- Si os matan, quedáis derribados en el suelo: el compañero os levanta
+  con H. Si caéis los dos, reapareceréis a los 5 segundos.
+- Los menús NO pausan el juego durante la sesión (¡cuidado al abrir
+  el inventario en combate!).
+- Al desconectar conservas tu partida y todo tu progreso.
+- Si algo falla, envía el archivo BepInEx\LogOutput.log al anfitrión.
+
+Requiere la misma versión del juego que el anfitrión (actualizad ambos
+en Steam antes de probar).

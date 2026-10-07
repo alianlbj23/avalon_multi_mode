@@ -1,0 +1,6 @@
+# installer / game runtime output
+install_log.txt
+BepInEx/LogOutput.log*
+BepInEx/config/
+BepInEx/cache/
+*.tmp

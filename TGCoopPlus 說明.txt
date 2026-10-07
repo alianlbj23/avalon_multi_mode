@@ -1,0 +1,48 @@
+TGCoopPlus 1.1.0 — TGCoop 0.5.36 的補丁外掛
+==========================================
+
+這個 ZIP 裡的 BepInEx\plugins\TGCoopPlus.dll 是額外的補丁，兩個人都要裝（用 install_TGCoop.bat 會自動一起裝）。
+※ 主機（Server）一定要裝：保護主機任務 / 經驗不被客戶端影響的那一段，是在主機這邊擋的。
+
+它做四件事：
+
+0. 主機權威模式（HostAuthority）
+   原版 TGCoop 是「雙向合併」：客戶端已完成的任務也會推給主機，主機套用時遊戲會發該任務的經驗，
+   所以主機一連線就狂升等。補丁把客戶端 → 主機這個方向整個切掉：客戶端不送任務、旗標、劇情獎勵，
+   主機也忽略這些封包。主機 → 客戶端照常。log 會有：
+     [HostAuthority] enabled: 10 method(s) guarded.
+
+
+1. 修正隊友 T-pose
+   遊戲更新後把動畫圖層的編號改了（Legs 從 9 變 10），TGCoop 寫死舊編號，
+   所以隊友的分身載入不到走路動畫、只會滑行。補丁在遊戲啟動時把這些編號改成現在的值。
+   成功的話 BepInEx\LogOutput.log 會有：
+     [AnimFix] patched PuppetAnimancer.TryFinishLoad
+   之後看到隊友時 log 應該出現「[Puppet] Animaciones listas」而不是「Mapeo Legs incompleto」。
+
+2. 任務進度不再漏掉（進度以主機為準）
+   TGCoop 收到主機的任務狀態時，如果你的世界還沒載好（在主選單、正在換地圖），
+   會直接報錯丟掉。補丁會先暫存這些封包，等世界載好再套用。
+   ※ 仍然建議：先載入存檔，再建立 / 加入房間。
+
+3. 連線面板（按 Insert 開關，可在設定檔改）
+   - 先選「主機」或「客戶端」（會記住）。
+   - 主機：按「建立房間並開啟 Steam 邀請視窗」。
+   - 客戶端：面板會列出正在開房的好友，按「加入」就進去，不用等 Steam 邀請。
+     連線後還有「向主機要求重新同步進度」按鈕。
+   - 「離開連線」= F10。
+
+設定檔：BepInEx\config\com.tgcoop.plus.cfg
+   ToggleKey      面板按鍵（預設 Insert）
+   PreferredRole  Host / Client / None
+   Language       zh / en
+   AnimLayerFix   true/false
+   StoryRetry     true/false
+
+快速自我測試（不用隊友）：載入存檔後按 F8 開「幽靈模式」，會生成一個自己的分身跟著你，
+分身有走路動作就代表 T-pose 修好了；再按一次 F8 關閉。
+
+寶箱：TGCoop 本來就不同步寶箱內容，兩個人各開各的，不會互搶。
+只有掉在地上的物品會同步（撿到的人拿走）。
+
+原始碼在 TGCoopPlus-src\，用 build.ps1 可重新編譯（只需要 Windows 內建的 csc.exe）。
