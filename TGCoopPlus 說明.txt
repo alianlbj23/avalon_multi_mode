@@ -1,4 +1,4 @@
-TGCoopPlus 1.8.0 — TGCoop 0.5.36 的補丁外掛
+TGCoopPlus 1.9.0 — TGCoop 0.5.36 的補丁外掛
 ==========================================
 
 這個 ZIP 裡的 BepInEx\plugins\TGCoopPlus.dll 是額外的補丁，兩個人都要裝（用 install_TGCoop.bat 會自動一起裝）。
@@ -67,6 +67,11 @@ TGCoopPlus 1.8.0 — TGCoop 0.5.36 的補丁外掛
    兩邊的作用中場景常常不同，結果整場普查都被丟掉，主機觸發的 boss 永遠不會出現在客戶端。
    現在只要主機的場景在客戶端已經載入就套用；客戶端換區 6 秒後、連續 3 次收到「NPC 找不到」、或每 3 分鐘，
    會自動向主機要求重送世界狀態。log 會有 [RegistryFix] applied census ... 與 [Census] asked the host ...。
+
+10. 對話與換區（DialogueGateFix + AutoFollow）
+   原模組要求隊友在 10 公尺內才能和 NPC 對話，否則點了沒反應（log 會有「Diálogo bloqueado」）。現在一律允許，
+   隊友太遠時對話就單機執行、不鏡像。
+   主機透過對話 / 門 / 船換地圖時，客戶端會自動跟過去（等載入結束才觸發，最多試 4 次）。不想自動跟隨可在設定檔把 AutoFollowHost 設為 false。
 
 每次開遊戲請用 play_TGCoop.bat（或桌面捷徑「TGCoop 啟動遊戲」）：
    它會先到 GitHub 檢查有沒有新版，有就自動更新模組，再啟動遊戲。兩個人都用它，版本就不會不同步。

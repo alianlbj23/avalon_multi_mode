@@ -42,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.8.0";
+        public const string Version = "1.9.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -56,6 +56,8 @@ namespace TGCoopPlus
         internal static ConfigEntry<bool> EnableHostAuthority;
         internal static ConfigEntry<bool> EnableSharedKillExp;
         internal static ConfigEntry<bool> EnableLegsFix;
+        internal static ConfigEntry<bool> AutoFollowHost;
+        internal static ConfigEntry<bool> DialogueNeedsPartnerNearby;
         internal static ConfigEntry<bool> AnimDebug;
 
         private Harmony _harmony;
@@ -81,6 +83,10 @@ namespace TGCoopPlus
                 "When the partner (or a host-confirmed kill) kills an enemy in your world, you also get the kill XP. / 隊友在你的世界殺死敵人時，你也獲得擊殺經驗。");
             EnableLegsFix = Config.Bind("Fixes", "LegsFix", true,
                 "Drive the clone's leg blend tree from the partner's velocity directly and play crouched legs when the partner crouches (first-person senders have no legs state machine). / 直接用隊友速度驅動分身腿部混合動畫，蹲下時播放蹲姿腿部動畫。");
+            AutoFollowHost = Config.Bind("Fixes", "AutoFollowHost", true,
+                "Client automatically travels to the host's zone when the host changes map (waits for loading to finish). / 主機換地圖時客戶端自動跟過去（會等載入結束）。");
+            DialogueNeedsPartnerNearby = Config.Bind("Fixes", "DialogueNeedsPartnerNearby", false,
+                "TGCoop refuses to start a dialogue when the partner is more than 10 m away. false = always allow (far dialogues simply run un-mirrored). / 原模組要求隊友在 10 公尺內才能對話；false = 一律允許（隊友太遠時對話不鏡像）。");
             AnimDebug = Config.Bind("Debug", "AnimDebug", true,
                 "Log every remote animation state applied to the partner clone (first 300 per session). / 記錄套用到隊友分身的每個遠端動畫狀態（每場前 300 筆）。");
 
@@ -127,6 +133,10 @@ namespace TGCoopPlus
             catch (Exception e) { Log.LogError("[CensusFix] failed: " + e); }
             try { RegistryFix.Apply(_harmony); }
             catch (Exception e) { Log.LogError("[RegistryFix] failed: " + e); }
+            try { if (!DialogueNeedsPartnerNearby.Value) DialogueGateFix.Apply(_harmony); }
+            catch (Exception e) { Log.LogError("[DialogueGateFix] failed: " + e); }
+            try { AutoFollow.Apply(); }
+            catch (Exception e) { Log.LogError("[AutoFollow] failed: " + e); }
             try
             {
                 if (AnimDebug.Value) AnimDebugLog.Apply(_harmony);
@@ -143,6 +153,7 @@ namespace TGCoopPlus
                 if (Input.GetKeyDown(PanelKey.Value)) Panel.Toggle();
                 StoryRetry.Tick();
                 CensusRequester.Tick();
+                AutoFollow.Tick();
                 Panel.Tick();
             }
             catch (Exception e)
@@ -194,6 +205,7 @@ namespace TGCoopPlus
         }
 
         private static object Manager { get { Resolve(); return _fInstance == null ? null : _fInstance.GetValue(null); } }
+        public static object ManagerObject { get { return Manager; } }
         public static object Session { get { var m = Manager; return (m == null || _fSession == null) ? null : _fSession.GetValue(m); } }
         private static object Transport { get { var m = Manager; return (m == null || _fTransport == null) ? null : _fTransport.GetValue(m); } }
 
@@ -1155,6 +1167,99 @@ namespace TGCoopPlus
             {
                 _lastRequest = now; _missingHits = 0;
                 Plugin.Log.LogInfo("[Census] asked the host to resend world state: " + reason);
+            }
+        }
+    }
+
+    // =====================================================================================
+    //  2l. DialogueGateFix — TGCoop refuses to start a dialogue if the partner is > 10 m away.
+    //      The mod already runs far dialogues un-mirrored, so the gate only causes "I can't talk
+    //      to this NPC". We answer "do not block".
+    // =====================================================================================
+    internal static class DialogueGateFix
+    {
+        private static int _count;
+        public static void Apply(Harmony h)
+        {
+            Type t = AccessTools.TypeByName("TGCoop.Sync.MirrorDialogue");
+            MethodInfo m = t == null ? null : AccessTools.Method(t, "ShouldBlockDialogueStart");
+            if (m == null) { Plugin.Log.LogWarning("[DialogueGateFix] MirrorDialogue.ShouldBlockDialogueStart not found; disabled."); return; }
+            h.Patch(m, new HarmonyMethod(typeof(DialogueGateFix), "Prefix"));
+            Plugin.Log.LogInfo("[DialogueGateFix] enabled (dialogues allowed at any partner distance).");
+        }
+        public static bool Prefix(ref bool __result)
+        {
+            __result = false;
+            if (_count++ == 0) Plugin.Log.LogInfo("[DialogueGateFix] distance gate bypassed (far dialogues run un-mirrored).");
+            return false;
+        }
+    }
+
+    // =====================================================================================
+    //  2m. AutoFollow — client follows the host to a new map automatically
+    //      When the host's scene (sent in its appearance) differs from ours and is not loaded here,
+    //      call TGCoop's own TravelToPartner once loading is complete; retry with backoff.
+    // =====================================================================================
+    internal static class AutoFollow
+    {
+        private static FieldInfo _fPlayerSync, _fRemoteScene;
+        private static MethodInfo _mTravel, _mLoadingCompleted;
+        private static float _mismatchSince = -1f, _lastAttempt = -999f;
+        private static int _attempts;
+        private static string _target;
+        private static bool _ready;
+
+        public static void Apply()
+        {
+            Type mgr = AccessTools.TypeByName("TGCoop.CoopManager");
+            Type ps = AccessTools.TypeByName("TGCoop.Sync.PlayerSync");
+            if (mgr == null || ps == null) return;
+            _fPlayerSync = AccessTools.Field(mgr, "_playerSync");
+            _fRemoteScene = AccessTools.Field(ps, "_remoteScene");
+            _mTravel = AccessTools.Method(ps, "TravelToPartner");
+            Type pre = AccessTools.TypeByName("Awaken.TG.Main.UI.RoguePreloader.ScenePreloader");
+            if (pre != null) _mLoadingCompleted = AccessTools.PropertyGetter(pre, "IsLoadingCompleted");
+            _ready = _fPlayerSync != null && _fRemoteScene != null && _mTravel != null;
+            Plugin.Log.LogInfo("[AutoFollow] " + (_ready ? "enabled" : "disabled (members not found)") + (_mLoadingCompleted == null ? " (no loading flag; will rely on retries)" : ""));
+        }
+
+        private static bool LoadingCompleted()
+        {
+            try { return _mLoadingCompleted == null || (bool)_mLoadingCompleted.Invoke(null, null); } catch { return true; }
+        }
+
+        private static void Reset() { _mismatchSince = -1f; _attempts = 0; _target = null; }
+
+        public static void Tick()
+        {
+            if (!_ready || !Plugin.AutoFollowHost.Value) return;
+            if (!Coop.Connected || Coop.IsHost) { Reset(); return; }
+            object mgr = Coop.ManagerObject; if (mgr == null) return;
+            object ps = _fPlayerSync.GetValue(mgr); if (ps == null) return;
+            string remote = _fRemoteScene.GetValue(ps) as string;
+            if (string.IsNullOrEmpty(remote)) { Reset(); return; }
+            string active = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            if (remote == active || UnityEngine.SceneManagement.SceneManager.GetSceneByName(remote).isLoaded) { Reset(); return; }
+
+            Hero hero = null; try { hero = Hero.Current; } catch { }
+            if (hero == null || hero.HasBeenDiscarded || !hero.IsAlive) return;
+
+            float now = Time.realtimeSinceStartup;
+            if (_target != remote) { _target = remote; _mismatchSince = now; _attempts = 0; }
+            if (now - _mismatchSince < 4f) return;                 // host may be mid-transition; let it settle
+            if (!LoadingCompleted()) return;                        // never start a second scene load
+            if (_attempts >= 4) return;                             // give up for this target (F3 still works)
+            if (now - _lastAttempt < 15f) return;
+
+            _lastAttempt = now; _attempts++;
+            try
+            {
+                _mTravel.Invoke(ps, null);
+                Plugin.Log.LogInfo("[AutoFollow] host is in '" + remote + "' (we are in '" + active + "'): following (attempt " + _attempts + ").");
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("[AutoFollow] travel failed: " + (e.InnerException != null ? e.InnerException.Message : e.Message));
             }
         }
     }
