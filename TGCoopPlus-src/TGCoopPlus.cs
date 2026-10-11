@@ -42,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.7.0";
+        public const string Version = "1.8.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -125,6 +125,8 @@ namespace TGCoopPlus
             catch (Exception e) { Log.LogError("[AuxLayerFix] failed: " + e); }
             try { CensusFix.Apply(_harmony); }
             catch (Exception e) { Log.LogError("[CensusFix] failed: " + e); }
+            try { RegistryFix.Apply(_harmony); }
+            catch (Exception e) { Log.LogError("[RegistryFix] failed: " + e); }
             try
             {
                 if (AnimDebug.Value) AnimDebugLog.Apply(_harmony);
@@ -140,6 +142,7 @@ namespace TGCoopPlus
             {
                 if (Input.GetKeyDown(PanelKey.Value)) Panel.Toggle();
                 StoryRetry.Tick();
+                CensusRequester.Tick();
                 Panel.Tick();
             }
             catch (Exception e)
@@ -1044,6 +1047,119 @@ namespace TGCoopPlus
     }
 
     // =====================================================================================
+    //  2j. RegistryFix — accept the host's NPC census when its scene is LOADED here, not only ACTIVE
+    //      Dungeons are additive scenes; the "active" scene can differ between the two players even
+    //      when both stand in the same dungeon. TGCoop compared active-scene names and silently
+    //      dropped every census -> bosses the host triggered never appeared on the client.
+    // =====================================================================================
+    internal static class RegistryFix
+    {
+        private static MethodInfo _converge, _isAuthority;
+        private static float _nextLog;
+        private static int _applied, _dropped;
+
+        public static void Apply(Harmony h)
+        {
+            Type t = AccessTools.TypeByName("TGCoop.Sync.WorldNpcSync");
+            if (t == null) return;
+            MethodInfo recv = AccessTools.Method(t, "OnRegistryReceived");
+            _converge = AccessTools.Method(t, "Converge");
+            _isAuthority = AccessTools.Method(t, "get_IsAuthority");
+            if (recv == null || _converge == null) { Plugin.Log.LogWarning("[RegistryFix] WorldNpcSync members not found; disabled."); return; }
+            h.Patch(recv, new HarmonyMethod(typeof(RegistryFix), "Prefix"));
+            Plugin.Log.LogInfo("[RegistryFix] enabled (census accepted for any loaded scene).");
+        }
+
+        public static bool Prefix(object[] __args)
+        {
+            try
+            {
+                if (__args == null || __args.Length < 2) return true;
+                byte[] payload = __args[0] as byte[];
+                if (payload == null || payload.Length < 8) return true;
+                if (_isAuthority != null && (bool)_isAuthority.Invoke(null, null)) return true;   // host: let the mod log its dry-run
+                if (__args[1] is CSteamID && (CSteamID)__args[1] == SteamUser.GetSteamID()) return true;
+
+                string hostScene; int count; List<ValueTuple<bool, string, string, Vector3>> list;
+                using (var ms = new System.IO.MemoryStream(payload))
+                using (var br = new System.IO.BinaryReader(ms, System.Text.Encoding.UTF8))
+                {
+                    hostScene = br.ReadString();
+                    br.ReadSingle(); br.ReadSingle(); br.ReadSingle();
+                    count = br.ReadUInt16();
+                    list = new List<ValueTuple<bool, string, string, Vector3>>(count);
+                    for (int i = 0; i < count; i++)
+                    {
+                        bool flag = br.ReadByte() != 0;
+                        string id = br.ReadString();
+                        string tpl = br.ReadString();
+                        float x = br.ReadSingle(), y = br.ReadSingle(), z = br.ReadSingle();
+                        list.Add(new ValueTuple<bool, string, string, Vector3>(flag, id, tpl, new Vector3(x, y, z)));
+                    }
+                }
+                string active = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                if (hostScene == active) { return true; }   // the mod handles the normal case itself
+
+                bool loaded = UnityEngine.SceneManagement.SceneManager.GetSceneByName(hostScene).isLoaded;
+                Hero hero = Hero.Current;
+                bool heroOk = hero != null && !hero.HasBeenDiscarded && hero.IsAlive;
+                if (!loaded || !heroOk)
+                {
+                    _dropped++;
+                    if (Time.realtimeSinceStartup >= _nextLog) { _nextLog = Time.realtimeSinceStartup + 30f; Plugin.Log.LogInfo("[RegistryFix] census for host scene '" + hostScene + "' not applicable here (active='" + active + "', loaded=" + loaded + ", hero=" + heroOk + "); dropped " + _dropped + " so far."); }
+                    return false;
+                }
+                _converge.Invoke(null, new object[] { list });
+                _applied++;
+                if (Time.realtimeSinceStartup >= _nextLog) { _nextLog = Time.realtimeSinceStartup + 30f; Plugin.Log.LogInfo("[RegistryFix] applied census of host scene '" + hostScene + "' (" + count + " NPCs) although active scene is '" + active + "' (applied " + _applied + " so far)."); }
+                return false;
+            }
+            catch (Exception e)
+            {
+                if (Time.realtimeSinceStartup >= _nextLog) { _nextLog = Time.realtimeSinceStartup + 30f; Plugin.Log.LogWarning("[RegistryFix] " + (e.InnerException != null ? e.InnerException.Message : e.Message)); }
+                return true;
+            }
+        }
+    }
+
+    // =====================================================================================
+    //  2k. CensusRequester — the client asks the host to resend world state when it is likely stale:
+    //      after arriving in a new scene, when remote hits target NPCs we do not have, and every 3 min.
+    //      (The request is the same "guest loaded" message TGCoop uses; the host re-emits baseline + census.)
+    // =====================================================================================
+    internal static class CensusRequester
+    {
+        private static string _lastScene;
+        private static float _sceneChangedAt, _lastRequest = -999f;
+        private static bool _requestedForScene;
+        private static int _missingHits;
+
+        public static void NoteMissingNpc() { _missingHits++; }
+
+        public static void Tick()
+        {
+            if (!Coop.Connected || Coop.IsHost) { _missingHits = 0; return; }
+            Hero hero = null; try { hero = Hero.Current; } catch { }
+            if (hero == null || hero.HasBeenDiscarded) return;
+            float now = Time.realtimeSinceStartup;
+            string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            if (scene != _lastScene) { _lastScene = scene; _sceneChangedAt = now; _requestedForScene = false; }
+
+            string reason = null;
+            if (!_requestedForScene && now - _sceneChangedAt > 6f && now - _lastRequest > 10f) { reason = "arrived in scene '" + scene + "'"; _requestedForScene = true; }
+            else if (_missingHits >= 3 && now - _lastRequest > 20f) { reason = _missingHits + " remote hit(s) on NPCs we do not have"; }
+            else if (now - _lastRequest > 180f) { reason = "periodic refresh"; }
+            if (reason == null) return;
+
+            if (Coop.RequestHostResync())
+            {
+                _lastRequest = now; _missingHits = 0;
+                Plugin.Log.LogInfo("[Census] asked the host to resend world state: " + reason);
+            }
+        }
+    }
+
+    // =====================================================================================
     //  2e. ErrorWatcher — count TGCoop / TGCoopPlus errors, keep the last few, export diagnostics
     // =====================================================================================
     internal class ErrorWatcher : ILogListener
@@ -1073,7 +1189,12 @@ namespace TGCoopPlus
                     }
                     LastError = line; LastErrorAt = Time.realtimeSinceStartup;
                 }
-                else if ((e.Level & LogLevel.Warning) != 0) Warnings++;
+                else if ((e.Level & LogLevel.Warning) != 0)
+                {
+                    Warnings++;
+                    string w = e.Data == null ? "" : e.Data.ToString();
+                    if (w.IndexOf("NPC no encontrado", StringComparison.OrdinalIgnoreCase) >= 0) CensusRequester.NoteMissingNpc();
+                }
             }
             catch { }
         }
@@ -1209,6 +1330,9 @@ namespace TGCoopPlus
                 return;
             }
             _rect = GUILayout.Window(0x7C00, _rect, Body, T("TGCoop 連線面板  (" + Plugin.PanelKey.Value + " 關閉)", "TGCoop co-op panel  (" + Plugin.PanelKey.Value + " to close)"));
+            // never let the window be dragged off screen
+            _rect.x = Mathf.Clamp(_rect.x, 0f, Mathf.Max(0f, Screen.width - _rect.width));
+            _rect.y = Mathf.Clamp(_rect.y, 0f, Mathf.Max(0f, Screen.height - 40f));
             GUI.skin.font = prev;
         }
 

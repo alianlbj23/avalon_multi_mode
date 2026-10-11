@@ -41,6 +41,7 @@
 |---|---|
 | LegsFix / MaskFix / AuxLayerFix | 第一人稱沒有腿部狀態機，分身腿部改由速度直接驅動、蹲下換蹲姿片段；上半身層改用不含腿的遮罩（原本用第一人稱全身遮罩把腿凍住）；工具層待機時淡出，不再蓋住手臂動作。 |
 | CensusFix | 主機 NPC 普查套用時，原模組一邊列舉 NPC 集合一邊刪除，造成「Index was out of range」錯誤；改成列舉完再統一移除。 |
+| RegistryFix / CensusRequester | 主機每 12 秒送的 NPC 普查，原模組只在「作用中場景名稱」相同時才套用；地城是附加場景，兩邊常不同，普查整場被丟掉，主機觸發的 boss 不會出現在客戶端。現在只要主機的場景在客戶端已載入就套用；客戶端換區後、連續收到「NPC 找不到」、或每 3 分鐘會自動向主機要求重送。 |
 | AnimLayerFix | 遊戲更新後動畫圖層編號改變（Legs 9→10），原模組寫死舊值導致隊友 T-pose。啟動時以執行中的遊戲列舉值修正。 |
 | StoryRetry | 世界還沒載入時暫存主機送來的任務 / 旗標封包，載好後再套用，不再丟失。 |
 | HostAuthority | 切斷客戶端 → 主機的任務、旗標、劇情獎勵同步，避免主機被動完成任務而經驗暴漲。 |
@@ -65,5 +66,5 @@ powershell -ExecutionPolicy Bypass -File TGCoopPlus-src\build.ps1
 
 - 遊戲 build 25629220
 - TGCoop 0.5.36（原作者的閉源模組，`LEEME-TGCoop.txt` 為原始說明）
-- TGCoopPlus 1.7.0
+- TGCoopPlus 1.8.0
 - BepInEx 5.4.23.3
