@@ -42,7 +42,7 @@ namespace TGCoopPlus
     {
         public const string Guid = "com.tgcoop.plus";
         public const string Name = "TGCoopPlus";
-        public const string Version = "1.6.3";
+        public const string Version = "1.7.0";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance;
@@ -123,6 +123,8 @@ namespace TGCoopPlus
                 if (EnableLegsFix.Value) AuxLayerFix.Apply(_harmony);
             }
             catch (Exception e) { Log.LogError("[AuxLayerFix] failed: " + e); }
+            try { CensusFix.Apply(_harmony); }
+            catch (Exception e) { Log.LogError("[CensusFix] failed: " + e); }
             try
             {
                 if (AnimDebug.Value) AnimDebugLog.Apply(_harmony);
@@ -961,6 +963,83 @@ namespace TGCoopPlus
                 }
             }
             catch (Exception e) { if (_logged++ < 20) Plugin.Log.LogWarning("[AuxLayerFix] " + e.Message); }
+        }
+    }
+
+    // =====================================================================================
+    //  2i. CensusFix — WorldNpcSync.Converge kills NPCs while enumerating World.All<NpcElement>()
+    //      ("[World] Error aplicando censo de NPCs: Index was out of range"). The kill inside the
+    //      loop is redirected to a queue that is flushed after the method returns.
+    // =====================================================================================
+    internal static class CensusFix
+    {
+        // ICharacter cannot be named from C# 5 (CS0648), so the killer travels as object and Kill is invoked by reflection.
+        private struct Pending
+        {
+            public object Health; public object Killer;
+            public bool Flag; public Vector3? Dir; public float? Force;
+        }
+        private static readonly List<Pending> _queue = new List<Pending>();
+        private static MethodInfo _kill;
+        private static int _replaced, _flushed;
+
+        private static MethodInfo FindKill()
+        {
+            Type he = AccessTools.TypeByName("Awaken.TG.Main.Character.HealthElement");
+            if (he == null) return null;
+            foreach (MethodInfo mi in he.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                if (mi.Name != "Kill") continue;
+                ParameterInfo[] ps = mi.GetParameters();
+                if (ps.Length == 4 && ps[0].ParameterType.Name == "ICharacter" && ps[1].ParameterType == typeof(bool)) return mi;
+            }
+            return null;
+        }
+
+        public static void Apply(Harmony h)
+        {
+            Type t = AccessTools.TypeByName("TGCoop.Sync.WorldNpcSync");
+            MethodInfo m = t == null ? null : AccessTools.Method(t, "Converge");
+            _kill = FindKill();
+            if (m == null || _kill == null) { Plugin.Log.LogWarning("[CensusFix] Converge or HealthElement.Kill not found; disabled."); return; }
+            h.Patch(m, null, new HarmonyMethod(typeof(CensusFix), "Postfix"), new HarmonyMethod(typeof(CensusFix), "Transpiler"));
+            Plugin.Log.LogInfo("[CensusFix] enabled (" + _replaced + " in-loop kill(s) deferred).");
+        }
+
+        public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            MethodInfo mine = AccessTools.Method(typeof(CensusFix), "DeferredKill");
+            foreach (CodeInstruction ci in instructions)
+            {
+                if (_kill != null && (ci.opcode == OpCodes.Callvirt || ci.opcode == OpCodes.Call) && ci.operand is MethodInfo && (MethodInfo)ci.operand == _kill)
+                {
+                    ci.opcode = OpCodes.Call;
+                    ci.operand = mine;
+                    _replaced++;
+                }
+                yield return ci;
+            }
+        }
+
+        // same stack shape as the instance call: (this, killer, flag, dir, force)
+        public static void DeferredKill(object health, object killer, bool flag, Vector3? dir, float? force)
+        {
+            var p = new Pending(); p.Health = health; p.Killer = killer; p.Flag = flag; p.Dir = dir; p.Force = force;
+            _queue.Add(p);
+        }
+
+        public static void Postfix()
+        {
+            if (_queue.Count == 0) return;
+            var batch = new List<Pending>(_queue); _queue.Clear();
+            int ok = 0;
+            foreach (Pending p in batch)
+            {
+                try { if (p.Health != null) { _kill.Invoke(p.Health, new object[] { p.Killer, p.Flag, p.Dir, p.Force }); ok++; } }
+                catch (Exception e) { Plugin.Log.LogWarning("[CensusFix] deferred kill failed: " + (e.InnerException != null ? e.InnerException.Message : e.Message)); }
+            }
+            _flushed += ok;
+            Plugin.Log.LogInfo("[CensusFix] census convergence: " + ok + " NPC(s) removed after enumeration (total " + _flushed + ").");
         }
     }
 

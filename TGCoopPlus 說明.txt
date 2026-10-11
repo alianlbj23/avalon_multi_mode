@@ -1,4 +1,4 @@
-TGCoopPlus 1.6.3 — TGCoop 0.5.36 的補丁外掛
+TGCoopPlus 1.7.0 — TGCoop 0.5.36 的補丁外掛
 ==========================================
 
 這個 ZIP 裡的 BepInEx\plugins\TGCoopPlus.dll 是額外的補丁，兩個人都要裝（用 install_TGCoop.bat 會自動一起裝）。
@@ -53,6 +53,14 @@ TGCoopPlus 1.6.3 — TGCoop 0.5.36 的補丁外掛
    第一人稱視角沒有腿部狀態機，分身腿部改由隊友速度直接驅動，蹲下時換成蹲姿片段。
    上半身武器層原本用第一人稱的全身遮罩，會把腿凍住（滑行）；現在改用不含腿的遮罩。
    工具層沒拿工具時會送 Idle，原本會蓋住手臂動作；現在淡出。
+
+8. NPC 普查修正（CensusFix）
+   客戶端套用主機的 NPC 普查時，原模組一邊列舉一邊刪除 NPC，會噴「Index was out of range」而中斷普查。
+   現在改成列舉完再統一移除。log 會有 [CensusFix] census convergence: N NPC(s) removed。
+
+睡覺 / 休息（原版模組已支援，已確認走的是被攔截的函式）：
+   客戶端休息 → 向主機要求跳時間 → 主機套用並廣播 → 兩邊一起天黑。主機休息 → 直接廣播。
+   幽靈模式可自測：在營火休息後 log 應出現 [Time] (dry-run) Salto de tiempo recibido。
 
 每次開遊戲請用 play_TGCoop.bat（或桌面捷徑「TGCoop 啟動遊戲」）：
    它會先到 GitHub 檢查有沒有新版，有就自動更新模組，再啟動遊戲。兩個人都用它，版本就不會不同步。
